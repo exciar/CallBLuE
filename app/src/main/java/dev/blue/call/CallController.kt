@@ -20,7 +20,11 @@ import kotlinx.coroutines.flow.StateFlow
  * we opened, CALLEE for ones we accepted; `xiaomi = true` on the Xiaomi profile), pass every received frame
  * to the returned session's `receive`, and call [detached] when the connection drops.
  */
-class CallController(private val context: Context, private val onCallActive: (Boolean) -> Unit) : CallSession.Events {
+class CallController(
+    private val context: Context,
+    private val onCallActive: (Boolean) -> Unit,
+    private val onPrepareCall: () -> Boolean = { true },
+) : CallSession.Events {
 
     data class CallUi(
         val peer: String,
@@ -54,6 +58,7 @@ class CallController(private val context: Context, private val onCallActive: (Bo
     fun dial(peer: Discovery.Peer): Boolean {
         if (session != null || _call.value != null) return false
         val connect = dialer ?: return false.also { Log.w(TAG, "no connection layer installed") }
+        if (!onPrepareCall()) return false
         connectionEpoch++
         _call.value = CallUi(peer.name, CallSession.State.CONNECTED, incoming = false)
         telecom.begin(peer.name, incoming = false, onSystemAnswer = {}, onSystemHangUp = ::hangUp, onSystemMute = ::setMuted, onSpeaker = ::onSpeaker)
@@ -88,6 +93,7 @@ class CallController(private val context: Context, private val onCallActive: (Bo
 
     /** Answer from our own UI or notification. */
     fun answer() {
+        if (session?.state != CallSession.State.RINGING || !onPrepareCall()) return
         telecom.answer()
         answerLocally()
     }
@@ -117,6 +123,7 @@ class CallController(private val context: Context, private val onCallActive: (Bo
     private fun answerLocally() {
         val s = session ?: return
         if (s.state != CallSession.State.RINGING) return
+        if (!onPrepareCall()) return
         ringer.stop()
         Notifications.cancelCall(context)
         s.answer()

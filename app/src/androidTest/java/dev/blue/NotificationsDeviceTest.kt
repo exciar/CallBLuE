@@ -1,6 +1,7 @@
 package dev.blue
 
 import android.Manifest
+import android.app.Activity
 import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -74,10 +75,21 @@ class NotificationsDeviceTest {
         assumeTrue("Do not interrupt an existing call", CallController.call.value == null)
         assumeTrue("The app requires Bluetooth hardware", context.getSystemService(BluetoothManager::class.java).adapter != null)
         grantRuntimePermissions()
-        val activity = instrumentation.startActivitySync(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val prefs = Prefs(context)
+        val originalEnabled = prefs.listeningEnabled
+        val originalStarted = prefs.listeningStarted
+        val originalRunning = BlueService.instance != null
+        var activity: Activity? = null
         var controller: CallController? = null
-        var attached = false
+        var testSession: CallSession? = null
+        var testEpoch: Long? = null
+        prefs.listeningEnabled = true
         try {
+            val testActivity = instrumentation.startActivitySync(
+                Intent(context, MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK),
+            )
+            activity = testActivity
             eventually("The listening service did not start") { BlueService.controller != null && serviceNotification() != null }
             val activeController = BlueService.controller!!
             controller = activeController
@@ -93,6 +105,15 @@ class NotificationsDeviceTest {
             assertAction(incoming, BlueService.ACTION_ANSWER)
             assertAction(incoming, BlueService.ACTION_DECLINE)
 
+            // Incoming calls must remain answerable after leaving the app: listening itself never
+            // acquires microphone access. The actual notification action must acquire it on Answer.
+            if (role == CallSession.Role.CALLEE) {
+                instrumentation.runOnMainSync { testActivity.finish() }
+                eventually("The activity did not finish before the incoming call") {
+                    testActivity.isDestroyed && !BlueService.isUiVisible
+                }
+            }
+
             // Queue both directions so attach() has installed its session before the first reply.
             val toRemote = ConcurrentLinkedQueue<ByteArray>()
             val toLocal = ConcurrentLinkedQueue<ByteArray>()
@@ -103,7 +124,8 @@ class NotificationsDeviceTest {
             instrumentation.runOnMainSync {
                 local = checkNotNull(activeController.attach(role,
                     { frame, audio -> if (!audio) toRemote.add(frame) }, xiaomi = mode == Crypto.Mode.XIAOMI))
-                attached = true
+                testSession = local
+                testEpoch = activeController.connectionEpoch
                 if (remoteRole == CallSession.Role.CALLER) remote.start()
                 exchange(local, remote, toRemote, toLocal)
                 assertEquals(CallSession.State.RINGING, if (role == CallSession.Role.CALLEE) local.state else remote.state)
@@ -158,8 +180,25 @@ class NotificationsDeviceTest {
             }
         } finally {
             instrumentation.runOnMainSync {
-                if (attached) controller?.hangUp()
-                activity.finish()
+                // A real call may arrive after the synthetic call ends; cleanup owns only its epoch.
+                if (testSession?.state != null && testSession?.state != CallSession.State.ENDED &&
+                    controller?.connectionEpoch == testEpoch) controller?.hangUp()
+                activity?.finish()
+            }
+            activity?.let { finished -> eventually("The test activity did not finish") { finished.isDestroyed } }
+            // Leave an unsolicited real call alone, including the availability needed to answer it.
+            if (CallController.call.value == null) {
+                if (!originalRunning || !originalEnabled) {
+                    instrumentation.runOnMainSync { context.stopService(Intent(context, BlueService::class.java)) }
+                    eventually("The test listener did not stop") { BlueService.instance == null && serviceNotification() == null }
+                }
+                prefs.listeningEnabled = originalEnabled
+                prefs.listeningStarted = originalStarted
+                BlueService.syncAvailability(context)
+                if (originalRunning && originalEnabled && BlueService.instance == null) {
+                    instrumentation.runOnMainSync { BlueService.start(context) }
+                    eventually("The original listener was not restored") { BlueService.instance != null }
+                }
             }
         }
     }

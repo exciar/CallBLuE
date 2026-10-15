@@ -24,6 +24,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- Lets BLuE notice Xiaomi's built-in feature and keep Xiaomi mode off there. -->
     <queries>
@@ -51,7 +52,15 @@
         <service
             android:name=".BlueService"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="connectedDevice|microphone|phoneCall" />
+
+        <receiver android:name=".StartupReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

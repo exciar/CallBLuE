@@ -2,9 +2,13 @@ package dev.blue
 
 import android.Manifest
 import android.bluetooth.BluetoothManager
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -29,6 +33,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -47,6 +52,8 @@ import dev.blue.call.CallSession
 
 class MainActivity : ComponentActivity() {
 
+    private val xiaomiBackgroundSettings = listOf("Xiaomi", "POCO", "Redmi").any { Build.MANUFACTURER.equals(it, ignoreCase = true) }
+
     private val permissions = buildList {
         if (Build.VERSION.SDK_INT >= 31) {
             add(Manifest.permission.BLUETOOTH_SCAN)
@@ -63,6 +70,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        BlueService.syncAvailability(this)
         if (permissions.all(::granted)) startIfAllowed() else request.launch(permissions)
         setContent {
             MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
@@ -74,7 +82,36 @@ class MainActivity : ComponentActivity() {
     private fun granted(p: String) = ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
 
     private fun startIfAllowed() {
-        if (permissions.all(::granted)) BlueService.start(this)
+        // Notifications and microphone can be granted later; neither is needed to advertise/listen.
+        if (BlueService.hasBluetoothPermissions(this)) BlueService.start(this)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        BlueService.setUiVisible(true)
+        startIfAllowed()
+    }
+
+    override fun onStop() {
+        BlueService.setUiVisible(false)
+        super.onStop()
+    }
+
+    private fun openBackgroundSettings() {
+        if (xiaomiBackgroundSettings) {
+            // Xiaomi documents this action; fall back to Apps if a future build removes it.
+            try {
+                startActivity(Intent("miui.intent.action.OP_AUTO_START").addCategory(Intent.CATEGORY_DEFAULT))
+                return
+            } catch (_: ActivityNotFoundException) {
+                // Other ROMs may retain the manufacturer name without Xiaomi's settings app.
+            } catch (_: SecurityException) {
+                // Some firmware exposes the action only to system apps.
+            }
+            startActivity(Intent(Settings.ACTION_APPLICATION_SETTINGS))
+        } else {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        }
     }
 
     @Composable
@@ -82,12 +119,30 @@ class MainActivity : ComponentActivity() {
         val peers by BlueService.peers.collectAsState()
         val call by CallController.call.collectAsState()
         val bluetoothOn by BlueService.bluetoothOn.collectAsState()
+        val available by BlueService.available.collectAsState()
         val prefs = remember { Prefs(this) }
         var name by remember { mutableStateOf(prefs.name) }
         val adapter = remember { getSystemService(BluetoothManager::class.java).adapter }
 
         Column(Modifier.safeDrawingPadding().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("BLuE", style = MaterialTheme.typography.headlineMedium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("BLuE", style = MaterialTheme.typography.headlineMedium, modifier = Modifier.weight(1f))
+                TextButton(onClick = ::openBackgroundSettings) { Text("Background settings") }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Available for nearby calls", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        if (xiaomiBackgroundSettings) "Friends can call off-screen. Enable BLuE in Background settings to resume after a restart."
+                        else "Friends can call while BLuE is off-screen. Resumes after a restart.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Switch(checked = available, enabled = call == null, onCheckedChange = {
+                    BlueService.setAvailable(this@MainActivity, it)
+                    if (it && !permissions.all(::granted)) request.launch(permissions)
+                })
+            }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(name, { name = it.take(24) }, label = { Text("Your name") }, singleLine = true, modifier = Modifier.weight(1f))
                 OutlinedButton(onClick = { prefs.name = name; BlueService.instance?.startDiscovery() }) { Text("Save") }
@@ -95,7 +150,8 @@ class MainActivity : ComponentActivity() {
             Text(
                 when {
                     adapter == null -> "This phone has no Bluetooth."
-                    bluetoothOn == null -> "Allow Bluetooth and microphone access to continue."
+                    !available -> "You're offline. Turn availability on to call or receive calls."
+                    bluetoothOn == null -> "Allow Bluetooth access to receive nearby calls."
                     bluetoothOn == false -> "Bluetooth is off. Turn it on to call nearby phones."
                     else -> "Long range: ${yesNo(adapter.isLeCodedPhySupported)} · Extended advertising: ${yesNo(adapter.isLeExtendedAdvertisingSupported)}"
                 },
@@ -104,7 +160,7 @@ class MainActivity : ComponentActivity() {
             XiaomiSettings(prefs)
             call?.let { CallCard(it) }
             Text("Nearby", style = MaterialTheme.typography.titleMedium)
-            if (peers.isEmpty()) Text("Looking for phones running BLuE…", style = MaterialTheme.typography.bodyMedium)
+            if (peers.isEmpty() && available && bluetoothOn == true) Text("Looking for phones running BLuE…", style = MaterialTheme.typography.bodyMedium)
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(peers, key = { it.key }) { peer ->
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -114,10 +170,12 @@ class MainActivity : ComponentActivity() {
                             Text(tags.joinToString(" · "), style = MaterialTheme.typography.bodySmall)
                         }
                         Button(onClick = {
-                            if (BlueService.controller?.dial(peer) != true) {
+                            if (!granted(Manifest.permission.RECORD_AUDIO)) {
+                                request.launch(permissions)
+                            } else if (BlueService.controller?.dial(peer) != true) {
                                 Toast.makeText(this@MainActivity, "Can't call right now. Check Bluetooth or end the current call.", Toast.LENGTH_LONG).show()
                             }
-                        }, enabled = call == null) { Text("Call") }
+                        }, enabled = call == null && available) { Text("Call") }
                     }
                 }
             }
@@ -187,7 +245,9 @@ class MainActivity : ComponentActivity() {
                 val controller = BlueService.controller
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (c.state == CallSession.State.RINGING) {
-                        Button(onClick = { controller?.answer() }) { Text("Answer") }
+                        Button(onClick = {
+                            if (granted(Manifest.permission.RECORD_AUDIO)) controller?.answer() else request.launch(permissions)
+                        }) { Text("Answer") }
                         OutlinedButton(onClick = { controller?.reject() }) { Text("Decline") }
                     } else {
                         Button(onClick = { controller?.hangUp() }) { Text("Hang up") }

@@ -32,6 +32,7 @@ object Notifications {
         .setContentText(text)
         .setContentIntent(openApp(context))
         .setOngoing(true)
+        .addAction(0, "Go offline", action(context, BlueService.ACTION_GO_OFFLINE))
         .build()
 
     /** Full-screen incoming-call notification with Answer/Decline. */
