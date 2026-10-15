@@ -17,7 +17,6 @@ Install Android Studio with **NDK (Side by side)**, then run `gradlew assembleDe
 ## Docs
 
 - [Protocol](docs/protocol.md)
-- [Call validation](docs/call-validation.md)
 
 ## Licence
 
