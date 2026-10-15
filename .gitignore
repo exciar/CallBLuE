@@ -1,0 +1,15 @@
+# Research material (decompiled Xiaomi code, pulled APKs). Never commit.
+/research/
+/graphify-out/
+
+# Gradle / Android Studio
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+.kotlin/
+.cxx/
+captures/
+*.apk
+*.aab
