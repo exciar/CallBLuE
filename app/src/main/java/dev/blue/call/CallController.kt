@@ -22,10 +22,24 @@ import kotlinx.coroutines.flow.StateFlow
  */
 class CallController(private val context: Context, private val onCallActive: (Boolean) -> Unit) : CallSession.Events {
 
-    data class CallUi(val peer: String, val state: CallSession.State, val incoming: Boolean, val checkCode: String? = null)
+    data class CallUi(
+        val peer: String,
+        val state: CallSession.State,
+        val incoming: Boolean,
+        val checkCode: String? = null,
+        val muted: Boolean = false,
+        val speaker: Boolean = false,
+    )
 
     /** Opens a connection to a peer; supplied by the connection layer. */
     var dialer: ((Discovery.Peer) -> Unit)? = null
+
+    /** Releases the link after queued signaling has drained, including a cancelled dial. */
+    var disconnect: ((Long) -> Unit)? = null
+
+    /** Identifies a dial/accepted call so late Bluetooth callbacks cannot clear a newer call. */
+    @Volatile var connectionEpoch: Long = 0
+        private set
 
     private val prefs = Prefs(context)
     private val telecom = Telecom(context)
@@ -33,14 +47,16 @@ class CallController(private val context: Context, private val onCallActive: (Bo
     private var session: CallSession? = null
     private var audio: AudioEngine? = null
     private var checkCode: String? = null
+    @Volatile private var muted = false
 
     /** Returns false when calling isn't possible (busy, or no connection layer installed). */
     @Synchronized
     fun dial(peer: Discovery.Peer): Boolean {
         if (session != null || _call.value != null) return false
         val connect = dialer ?: return false.also { Log.w(TAG, "no connection layer installed") }
+        connectionEpoch++
         _call.value = CallUi(peer.name, CallSession.State.CONNECTED, incoming = false)
-        telecom.begin(peer.name, incoming = false, onSystemAnswer = {}, onSystemHangUp = ::hangUp)
+        telecom.begin(peer.name, incoming = false, onSystemAnswer = {}, onSystemHangUp = ::hangUp, onSystemMute = ::setMuted, onSpeaker = ::onSpeaker)
         connect(peer)
         return true
     }
@@ -52,6 +68,10 @@ class CallController(private val context: Context, private val onCallActive: (Bo
     @Synchronized
     fun attach(role: CallSession.Role, send: (ByteArray, Boolean) -> Unit, xiaomi: Boolean = false): CallSession? {
         if (session != null) return null
+        if (role == CallSession.Role.CALLEE) {
+            if (_call.value != null) return null
+            connectionEpoch++
+        }
         val mode = if (xiaomi) Crypto.Mode.XIAOMI else Crypto.Mode.SECURE
         val me = if (xiaomi) prefs.xiaomiNumber else prefs.name
         return CallSession(role, mode, me, send, this).also {
@@ -61,7 +81,8 @@ class CallController(private val context: Context, private val onCallActive: (Bo
     }
 
     @Synchronized
-    fun detached() {
+    fun detached(epoch: Long = connectionEpoch) {
+        if (epoch != connectionEpoch) return
         if (session != null || _call.value != null) finish(local = false)
     }
 
@@ -79,8 +100,23 @@ class CallController(private val context: Context, private val onCallActive: (Bo
         session?.hangUp() ?: finish(local = true)
     }
 
+    /** Silences our microphone for the peer; also driven by headset/car mute through Android's call system. */
+    fun setMuted(muted: Boolean) {
+        this.muted = muted
+        audio?.muted = muted
+        update { it.copy(muted = muted) }
+    }
+
+    /** Asks Android's call system to move call audio to (or off) the loudspeaker; [onSpeaker] reports the result. */
+    fun setSpeaker(on: Boolean) {
+        telecom.setSpeaker(on)
+    }
+
+    private fun onSpeaker(on: Boolean) = update { it.copy(speaker = on) }
+
     private fun answerLocally() {
         val s = session ?: return
+        if (s.state != CallSession.State.RINGING) return
         ringer.stop()
         Notifications.cancelCall(context)
         s.answer()
@@ -96,7 +132,7 @@ class CallController(private val context: Context, private val onCallActive: (Bo
 
     override fun onIncomingCall(number: String) {
         _call.value = CallUi(number, CallSession.State.RINGING, incoming = true, checkCode = checkCode)
-        telecom.begin(number, incoming = true, onSystemAnswer = ::answerLocally, onSystemHangUp = ::hangUp)
+        telecom.begin(number, incoming = true, onSystemAnswer = ::answerLocally, onSystemHangUp = ::hangUp, onSystemMute = ::setMuted, onSpeaker = ::onSpeaker)
         ringer.start()
         context.getSystemService(android.app.NotificationManager::class.java)
             .notify(Notifications.CALL_ID, Notifications.incoming(context, number))
@@ -115,10 +151,15 @@ class CallController(private val context: Context, private val onCallActive: (Bo
         audio?.play(frames)
     }
 
+    @Synchronized
     private fun startAudio() {
-        update { it.copy(state = CallSession.State.ACTIVE) }
-        onCallActive(true)
-        audio = AudioEngine { packet -> session?.sendAudio(packet) }.also { it.start() }
+        if (audio != null || session?.state != CallSession.State.ACTIVE) return
+        update { it.copy(state = CallSession.State.ACTIVE, muted = muted) }
+        onCallActive(true) // the service swaps its notification for the ongoing-call one
+        audio = AudioEngine { packet -> session?.sendAudio(packet) }.also {
+            it.muted = muted
+            it.start()
+        }
     }
 
     @Synchronized
@@ -130,8 +171,10 @@ class CallController(private val context: Context, private val onCallActive: (Bo
         telecom.end(local)
         session = null
         checkCode = null
+        muted = false
         _call.value = null
         onCallActive(false)
+        disconnect?.invoke(connectionEpoch)
     }
 
     private fun update(f: (CallUi) -> CallUi) {

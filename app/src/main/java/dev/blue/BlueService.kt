@@ -13,6 +13,7 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import dev.blue.ble.AppAd
 import dev.blue.ble.Discovery
+import dev.blue.ble.GattConnection
 import dev.blue.ble.XiaomiAd
 import dev.blue.call.CallController
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,6 +24,7 @@ class BlueService : Service() {
 
     private lateinit var adapter: BluetoothAdapter
     private var discovery: Discovery? = null
+    private var connection: GattConnection? = null
     private val seen = LinkedHashMap<String, Pair<Discovery.Peer, Long>>()
 
     private val bluetoothState = object : BroadcastReceiver() {
@@ -33,6 +35,8 @@ class BlueService : Service() {
                     _bluetoothOn.value = false
                     discovery?.stop()
                     discovery = null
+                    connection?.close()
+                    connection = null
                     _peers.value = emptyList()
                 }
             }
@@ -55,6 +59,7 @@ class BlueService : Service() {
         when (intent?.action) {
             ACTION_ANSWER -> controller?.answer()
             ACTION_DECLINE -> controller?.reject()
+            ACTION_HANG_UP -> controller?.hangUp()
         }
         return START_STICKY
     }
@@ -66,6 +71,8 @@ class BlueService : Service() {
         val me = AppAd(prefs.id, prefs.name, adapter.isLeCodedPhySupported, adapter.isLeExtendedAdvertisingSupported)
         // visibleToAll: stock Xiaomi phones otherwise list us only if our number is in their contacts.
         val xiaomi = if (prefs.xiaomiMode && xiaomiModeAvailable(this)) XiaomiAd(prefs.xiaomiNumber, "", visibleToAll = true) else null
+        if (connection == null) connection = controller?.let { GattConnection(this, it) }
+        connection?.start(xiaomi != null)
         discovery?.stop()
         synchronized(this) { seen.clear(); _peers.value = emptyList() }
         discovery = Discovery(adapter, ::onPeer).also { it.start(me, xiaomi) }
@@ -84,14 +91,19 @@ class BlueService : Service() {
         if (callActive && Build.VERSION.SDK_INT >= 30) {
             types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
         }
-        val text = if (callActive) "In an offline call" else "Listening for nearby calls"
-        ServiceCompat.startForeground(this, Notifications.SERVICE_ID, Notifications.service(this, text), types)
+        // Android only accepts a CallStyle notification from a foreground service (or with a full-screen
+        // intent), so during a call the service's own notification becomes the ongoing-call one.
+        val peer = CallController.call.value?.peer?.ifBlank { null } ?: "Offline call"
+        val notification = if (callActive) Notifications.ongoing(this, peer) else Notifications.service(this, "Listening for nearby calls")
+        ServiceCompat.startForeground(this, Notifications.SERVICE_ID, notification, types)
     }
 
     override fun onDestroy() {
         unregisterReceiver(bluetoothState)
         discovery?.stop()
         controller?.hangUp()
+        connection?.close()
+        connection = null
         controller = null
         instance = null
         _bluetoothOn.value = null
@@ -103,6 +115,7 @@ class BlueService : Service() {
     companion object {
         const val ACTION_ANSWER = "dev.blue.ANSWER"
         const val ACTION_DECLINE = "dev.blue.DECLINE"
+        const val ACTION_HANG_UP = "dev.blue.HANG_UP"
         private const val STALE_MS = 30_000L
 
         private val _peers = MutableStateFlow<List<Discovery.Peer>>(emptyList())

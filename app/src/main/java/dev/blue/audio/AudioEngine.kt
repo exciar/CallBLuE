@@ -24,6 +24,9 @@ class AudioEngine(private val onPacket: (ByteArray) -> Unit) {
     private val packer = FramePacker()
     private val incoming = LinkedBlockingQueue<ByteArray>(32)
     @Volatile private var running = false
+
+    /** Sends silence instead of the microphone, keeping the packet rhythm the peer expects. */
+    @Volatile var muted = false
     private var record: AudioRecord? = null
     private var track: AudioTrack? = null
     private val workers = mutableListOf<Thread>()
@@ -59,7 +62,9 @@ class AudioEngine(private val onPacket: (ByteArray) -> Unit) {
         workers += thread(name = "BLuE-mic") {
             val pcm = ShortArray(speex.frameSize)
             while (running) {
-                if (rec.read(pcm, 0, pcm.size) == pcm.size) packer.add(speex.encode(pcm))?.let(onPacket)
+                if (rec.read(pcm, 0, pcm.size) != pcm.size) continue
+                if (muted) pcm.fill(0)
+                packer.add(speex.encode(pcm))?.let(onPacket)
             }
         }
         workers += thread(name = "BLuE-speaker") {

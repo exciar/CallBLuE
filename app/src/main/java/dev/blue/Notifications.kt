@@ -50,6 +50,21 @@ object Notifications {
         ))
         .build()
 
+    /** Shown for the whole active call; Android 14+ expects a call notification while a VoIP call is ongoing. */
+    fun ongoing(context: Context, peer: String) = NotificationCompat.Builder(context, CALL_CHANNEL)
+        .setSmallIcon(android.R.drawable.stat_sys_phone_call)
+        .setContentTitle(peer)
+        .setContentText("Offline call")
+        .setCategory(NotificationCompat.CATEGORY_CALL)
+        .setOngoing(true)
+        .setOnlyAlertOnce(true)
+        .setContentIntent(openApp(context))
+        .setStyle(NotificationCompat.CallStyle.forOngoingCall(
+            Person.Builder().setName(peer).build(),
+            action(context, BlueService.ACTION_HANG_UP),
+        ))
+        .build()
+
     fun cancelCall(context: Context) = context.getSystemService(NotificationManager::class.java).cancel(CALL_ID)
 
     private fun openApp(context: Context) = PendingIntent.getActivity(

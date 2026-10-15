@@ -14,16 +14,14 @@ Offline voice calls between Android phones over Bluetooth Low Energy: no SIM, Wi
 | Speex codec (libspeex 1.2.1 through the NDK) | done; on-device test in `androidTest` |
 | Xiaomi broadcast format, Xiaomi call sequence (block-list query) | done, unit-tested |
 | Nearby-phone discovery: standard, long range (Coded PHY), Xiaomi-compatible | working on phones (Xiaomi 2510DPC44G, OnePlus 7) |
-| Audio engine, Android call integration (core-telecom), service, UI | installed and running; calls untested until the connection layer exists |
-| **GATT connection layer** | **missing**: see below |
+| Audio engine, Android call integration (core-telecom), service, UI | two-way calls verified on phones; microphone mute and ongoing Hang up notification |
+| GATT connection layer | implemented: client/server, both profiles, MTU negotiation, Coded S=8, queued writes and notifications |
 
-### The missing piece
+### Connections and validation
 
-Calls need a GATT server and client implementing the profiles in [`docs/protocol.md`](docs/protocol.md) (`GattProfile.APP` and `GattProfile.XIAOMI`). Plug it into `CallController` (`app/src/main/java/dev/blue/call/CallController.kt`):
+`BlueService` owns the GATT connection layer and its worker thread. It connects discovery peers using `GattProfile.APP` or `GattProfile.XIAOMI`, attaches the appropriate caller/callee session after channel setup, and detaches on disconnection. Writes and notifications are serialized, with bounded audio queues and a short signaling drain before local disconnect.
 
-- Set `dialer` to open a connection to a `Discovery.Peer`. Use the Xiaomi profile when `peer.xiaomi` is true. For long range, connect over Coded PHY and prefer S=8 coding.
-- When frames can flow, call `attach(role, send, xiaomi)` and feed every received frame to the returned session's `receive`.
-- Call `detached()` when the connection drops.
+BLuE-to-BLuE calls have been checked for matching check codes and two-way speech. Stock Xiaomi interoperability has been exercised in both directions with a Samsung S25 Ultra. See [`docs/call-validation.md`](docs/call-validation.md) for the evidence and remaining checks.
 
 ### Xiaomi compatibility
 

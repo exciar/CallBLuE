@@ -115,7 +115,7 @@ class MainActivity : ComponentActivity() {
                         }
                         Button(onClick = {
                             if (BlueService.controller?.dial(peer) != true) {
-                                Toast.makeText(this@MainActivity, "Calling isn't available yet: the Bluetooth connection layer isn't built.", Toast.LENGTH_LONG).show()
+                                Toast.makeText(this@MainActivity, "Can't call right now. Check Bluetooth or end the current call.", Toast.LENGTH_LONG).show()
                             }
                         }, enabled = call == null) { Text("Call") }
                     }
@@ -191,7 +191,19 @@ class MainActivity : ComponentActivity() {
                         OutlinedButton(onClick = { controller?.reject() }) { Text("Decline") }
                     } else {
                         Button(onClick = { controller?.hangUp() }) { Text("Hang up") }
+                        if (c.state == CallSession.State.ACTIVE) {
+                            OutlinedButton(onClick = { controller?.setMuted(!c.muted) }) { Text(if (c.muted) "Unmute" else "Mute") }
+                            val speakerLabel = if (c.speaker) "Speaker on" else "Speaker"
+                            if (c.speaker) {
+                                Button(onClick = { controller?.setSpeaker(false) }) { Text(speakerLabel) }
+                            } else {
+                                OutlinedButton(onClick = { controller?.setSpeaker(true) }) { Text(speakerLabel) }
+                            }
+                        }
                     }
+                }
+                if (c.muted) {
+                    Text("Your microphone is muted", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
             }
         }
